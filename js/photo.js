@@ -1,5 +1,15 @@
 // photo.js — reduce y recomprime la foto antes de guardarla.
 
+/** Máximo de fotos por anotación: cada una ocupa 150–300 KB cifrados y el almacenamiento del móvil es limitado. */
+export const MAX_PHOTOS = 4;
+
+/** Ids de foto de una anotación. Las antiguas guardaban una sola en `photoId`. */
+export function photoIdsOf(e) {
+  if (!e) return [];
+  if (Array.isArray(e.photoIds)) return e.photoIds.filter(Boolean);
+  return e.photoId ? [e.photoId] : [];
+}
+
 export async function processPhoto(file) {
   const img = await loadImage(file);
   const full = await toJpeg(img, 1400, 0.82);

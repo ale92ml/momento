@@ -13,7 +13,7 @@ import {
   loadCustomWords,
   rememberCustomWord,
 } from './emotions.js';
-import { processPhoto, blobToDataURL, dataURLToBlob } from './photo.js';
+import { processPhoto, blobToDataURL, dataURLToBlob, MAX_PHOTOS, photoIdsOf } from './photo.js';
 import {
   fmtTime,
   fmtFull,
@@ -26,8 +26,8 @@ import {
   escapeHtml as esc,
   formatBytes,
 } from './format.js';
-import { summarize, filterLastDays } from './stats.js';
-import { statsGrid, familyList, wordsCloud, stackedRows, calendarChart, famColor, emotionTags } from './charts.js';
+import { summarize, filterLastDays, weeklyBalance } from './stats.js';
+import { statsGrid, familyList, wordsCloud, stackedRows, calendarChart, famColor, emotionTags, balanceChart } from './charts.js';
 import { skyFor, greetingFor, skyVars, skyLayers } from './sky.js';
 import { buildReport, standaloneHTML, shareOrDownload } from './report.js';
 import {
@@ -45,7 +45,7 @@ import {
 } from './colors.js';
 import { STACK_ORDER } from './emotions.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.2.0';
 const DAY_MS = 86400000;
 const THEME_KEY = 'momento.theme';
 const PERSIST_KEY = 'momento.persist';
@@ -72,7 +72,8 @@ const els = {
 const state = {
   entries: null,
   thumbs: new Map(),
-  fullURL: null,
+  fullURLs: [],
+  filter: { q: '', fam: null },
   range: 30,
   hasPin: false,
   hiddenAt: null,
@@ -88,6 +89,14 @@ const ICON_PLUS_SM =
   '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg>';
 const ICON_CHECK =
   '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12l5 5 9-10" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_CHEVRON =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_ZOOM =
+  '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_STAR =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.8 1.1-5.9-4.3-4.1 5.9-.8z" fill="currentColor"/></svg>';
+const ICON_CLOSE =
+  '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
 
 // ---------- utilidades de interfaz ----------
 
@@ -187,9 +196,223 @@ async function hydrateThumbs(root) {
 }
 
 function releaseFull() {
-  if (state.fullURL) URL.revokeObjectURL(state.fullURL);
-  state.fullURL = null;
+  for (const url of state.fullURLs) URL.revokeObjectURL(url);
+  state.fullURLs = [];
 }
+
+// ---------- visor de foto a pantalla completa ----------
+
+let lightbox = null;
+
+const ICON_SHARE =
+  '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M5 13v6h14v-6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PREV =
+  '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_NEXT =
+  '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+/**
+ * Abre una o varias fotos encima de todo. `items` es [{ url, blob }]; `index` la primera que se ve.
+ * Pellizco para ampliar, arrastre, doble toque, deslizar para pasar de foto y compartir con la hoja nativa.
+ */
+function openLightbox(items, index = 0) {
+  if (lightbox) closeLightbox({ silent: true });
+  const list = Array.isArray(items) ? items : [{ url: items }];
+  if (!list.length) return;
+  let idx = Math.max(0, Math.min(list.length - 1, index));
+  const many = list.length > 1;
+
+  const el = document.createElement('div');
+  el.className = 'lightbox';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Foto ampliada');
+  el.innerHTML = `<div class="lb-top">
+      <span class="lb-count"></span>
+      <span class="lb-spacer"></span>
+      <button type="button" class="lb-btn lb-share" aria-label="Compartir foto">${ICON_SHARE}</button>
+      <button type="button" class="lb-btn lb-close" aria-label="Cerrar">${ICON_CLOSE}</button>
+    </div>
+    <div class="lb-stage"><img alt="" draggable="false" /></div>
+    ${many ? `<button type="button" class="lb-btn lb-nav lb-prev" aria-label="Anterior">${ICON_PREV}</button><button type="button" class="lb-btn lb-nav lb-next" aria-label="Siguiente">${ICON_NEXT}</button>` : ''}
+    <div class="lb-hint">${many ? 'Desliza para pasar de foto · ' : ''}Pellizca o toca dos veces para ampliar</div>`;
+  document.body.appendChild(el);
+  document.body.classList.add('lb-open');
+  try {
+    history.pushState({ lightbox: true }, '');
+  } catch (e) {}
+  lightbox = { el, pushed: true };
+
+  const stage = $('.lb-stage', el);
+  const img = $('img', el);
+  const hint = $('.lb-hint', el);
+  const count = $('.lb-count', el);
+  const shareBtn = $('.lb-share', el);
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
+  const pointers = new Map();
+  let pinch = null;
+  let lastTap = 0;
+  let moved = false;
+  let swipe = null;
+
+  const apply = () => {
+    if (scale <= 1.001) {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+    } else {
+      const r = stage.getBoundingClientRect();
+      const maxX = ((scale - 1) * r.width) / 2;
+      const maxY = ((scale - 1) * r.height) / 2;
+      tx = Math.max(-maxX, Math.min(maxX, tx));
+      ty = Math.max(-maxY, Math.min(maxY, ty));
+    }
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    el.classList.toggle('zoomed', scale > 1);
+  };
+  const zoomAt = (factor, cx, cy) => {
+    const r = stage.getBoundingClientRect();
+    const px = cx - r.left - r.width / 2;
+    const py = cy - r.top - r.height / 2;
+    const next = Math.max(1, Math.min(5, scale * factor));
+    const k = next / scale;
+    tx = px - (px - tx) * k;
+    ty = py - (py - ty) * k;
+    scale = next;
+    apply();
+  };
+  const show = (i) => {
+    idx = (i + list.length) % list.length;
+    scale = 1;
+    apply();
+    img.src = list[idx].url;
+    count.textContent = many ? `${idx + 1} / ${list.length}` : '';
+    el.classList.toggle('first', idx === 0);
+    el.classList.toggle('last', idx === list.length - 1);
+  };
+  show(idx);
+  if (!(navigator.share || list[idx].blob)) shareBtn.hidden = true;
+
+  stage.addEventListener('pointerdown', (ev) => {
+    stage.setPointerCapture(ev.pointerId);
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    moved = false;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale };
+      swipe = null;
+    } else if (pointers.size === 1 && scale === 1 && many) {
+      swipe = { x: ev.clientX, y: ev.clientY, dx: 0 };
+    }
+  });
+  stage.addEventListener('pointermove', (ev) => {
+    const prev = pointers.get(ev.pointerId);
+    if (!prev) return;
+    const cur = { x: ev.clientX, y: ev.clientY };
+    if (pointers.size === 2 && pinch) {
+      pointers.set(ev.pointerId, cur);
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const target = Math.max(1, Math.min(5, (pinch.scale * dist) / (pinch.dist || 1)));
+      zoomAt(target / scale, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      moved = true;
+      return;
+    }
+    if (pointers.size === 1 && scale > 1) {
+      tx += cur.x - prev.x;
+      ty += cur.y - prev.y;
+      if (Math.abs(cur.x - prev.x) + Math.abs(cur.y - prev.y) > 1) moved = true;
+      apply();
+    } else if (pointers.size === 1 && swipe) {
+      swipe.dx = cur.x - swipe.x;
+      if (Math.abs(swipe.dx) > 6) moved = true;
+      img.style.transform = `translate(${swipe.dx}px, 0)`;
+    }
+    pointers.set(ev.pointerId, cur);
+  });
+  const up = (ev) => {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (swipe && pointers.size === 0) {
+      const dx = swipe.dx;
+      swipe = null;
+      if (Math.abs(dx) > 60) {
+        show(dx < 0 ? idx + 1 : idx - 1);
+        hint.hidden = true;
+        return;
+      }
+      apply();
+    }
+    if (ev.type === 'pointerup' && pointers.size === 0 && !moved) {
+      const now = Date.now();
+      if (now - lastTap < 320) {
+        if (scale > 1) {
+          scale = 1;
+          apply();
+        } else zoomAt(2.5, ev.clientX, ev.clientY);
+        lastTap = 0;
+      } else lastTap = now;
+      hint.hidden = true;
+    }
+  };
+  stage.addEventListener('pointerup', up);
+  stage.addEventListener('pointercancel', up);
+  stage.addEventListener(
+    'wheel',
+    (ev) => {
+      ev.preventDefault();
+      zoomAt(ev.deltaY < 0 ? 1.15 : 1 / 1.15, ev.clientX, ev.clientY);
+    },
+    { passive: false }
+  );
+  el.addEventListener('click', (ev) => {
+    if (ev.target.closest('.lb-close')) closeLightbox();
+    else if (ev.target.closest('.lb-prev')) show(idx - 1);
+    else if (ev.target.closest('.lb-next')) show(idx + 1);
+    else if (ev.target.closest('.lb-share')) sharePhoto(list[idx]);
+  });
+  lightbox.onKey = (ev) => {
+    if (ev.key === 'ArrowRight' && many) show(idx + 1);
+    else if (ev.key === 'ArrowLeft' && many) show(idx - 1);
+  };
+  setTimeout(() => (hint.hidden = true), 2800);
+}
+
+async function sharePhoto(item) {
+  try {
+    let blob = item.blob;
+    if (!blob) blob = await (await fetch(item.url)).blob();
+    const file = new File([blob], `momento-${dayKey(Date.now())}.jpg`, { type: blob.type || 'image/jpeg' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Foto de Momento' });
+      return;
+    }
+    const r = await shareOrDownload(blob, file.name, 'Foto de Momento');
+    if (r === 'downloaded') toast('Foto descargada');
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    toast('No se pudo compartir la foto');
+  }
+}
+
+function closeLightbox({ silent = false } = {}) {
+  if (!lightbox) return;
+  const { el, pushed } = lightbox;
+  lightbox = null;
+  el.remove();
+  document.body.classList.remove('lb-open');
+  if (pushed && !silent) history.back();
+}
+
+window.addEventListener('popstate', () => {
+  if (lightbox) closeLightbox({ silent: true });
+});
+document.addEventListener('keydown', (ev) => {
+  if (!lightbox) return;
+  if (ev.key === 'Escape') closeLightbox();
+  else if (lightbox.onKey) lightbox.onKey(ev);
+});
 
 // ---------- bloqueo ----------
 
@@ -297,14 +520,35 @@ function primaryOf(e) {
   return (e.emotions && e.emotions[0] && e.emotions[0].family) || 'otra';
 }
 
+/** Intensidad de una emoción concreta; las anotaciones antiguas solo tienen una global. */
+function emIntensity(e, em) {
+  const v = em && em.intensity != null ? Number(em.intensity) : Number(e.intensity);
+  return Math.max(0, Math.min(10, Math.round(v || 0)));
+}
+
+/** True si la anotación tiene varias emociones con intensidades distintas. */
+function hasMixedIntensity(e) {
+  const list = e.emotions || [];
+  if (list.length < 2) return false;
+  const first = emIntensity(e, list[0]);
+  return list.some((em) => emIntensity(e, em) !== first);
+}
+
 function entryRow(e) {
   const i = Number(e.intensity) || 0;
+  const mixed = hasMixedIntensity(e);
   const words = (e.emotions || [])
-    .map((em) => `<span class="w" style="--c:${famColor(em.family || 'otra')}"><i class="dot"></i>${esc(em.word)}</span>`)
+    .map(
+      (em) =>
+        `<span class="w" style="--c:${famColor(em.family || 'otra')}"><i class="dot"></i>${esc(em.word)}${mixed ? `<small>${emIntensity(e, em)}</small>` : ''}</span>`
+    )
     .join('');
   const note = e.note ? `<div class="note">${esc(e.note)}</div>` : '';
-  const thumb = e.photoId ? `<img class="thumb" data-photo="${esc(e.photoId)}" alt="" />` : '';
-  return `<a class="entry${e.photoId ? ' has-thumb' : ''}" href="#/entry/${esc(e.id)}">
+  const pids = photoIdsOf(e);
+  const thumb = pids.length
+    ? `<span class="thumb-wrap"><img class="thumb" data-photo="${esc(pids[0])}" alt="" />${pids.length > 1 ? `<span class="thumb-n">+${pids.length - 1}</span>` : ''}</span>`
+    : '';
+  return `<a class="entry${pids.length ? ' has-thumb' : ''}" href="#/entry/${esc(e.id)}">
     <div class="time">${esc(fmtTime(e.createdAt))}<small>${i}/10</small></div>
     <div><div class="words">${words}</div>${note}<div class="meter" style="--c:${famColor(primaryOf(e))}"><i style="width:${i * 10}%"></i></div></div>
     ${thumb}
@@ -336,22 +580,90 @@ function detailTitle(e) {
   return w.charAt(0).toUpperCase() + w.slice(1);
 }
 
+/** Filtra el diario por texto (palabra, nota, pensamiento) y por familia (cualquiera de sus emociones). */
+function filterEntries(entries, { q, fam }) {
+  const needle = (q || '').trim().toLowerCase();
+  if (!needle && !fam) return entries;
+  return entries.filter((e) => {
+    const ems = e.emotions || [];
+    if (fam && !ems.some((em) => (em.family || 'otra') === fam)) return false;
+    if (!needle) return true;
+    return (
+      ems.some((em) => (em.word || '').toLowerCase().includes(needle)) ||
+      (e.note || '').toLowerCase().includes(needle) ||
+      (e.thought || '').toLowerCase().includes(needle)
+    );
+  });
+}
+
 async function viewHome() {
   setChrome({ title: 'Momento' });
   setActiveTab('home');
   const entries = await getEntries();
-  const groups = groupByDay(entries);
-  const timeline = groups.length
-    ? groups
+  const f = state.filter;
+  const famChips = FAMILIES.map(
+    (fm) =>
+      `<button type="button" class="chip small${f.fam === fm.id ? ' selected' : ''}" data-ffam="${fm.id}" style="--c:${famColor(fm.id)}"><i class="dot"></i>${esc(fm.label)}</button>`
+  ).join('');
+  const search = entries.length
+    ? `<div class="search" id="search">
+        <div class="search-row">
+          <input type="search" id="q" placeholder="Buscar palabra, nota o pensamiento…" value="${esc(f.q)}" autocomplete="off" aria-label="Buscar en el diario" />
+          <button type="button" class="icon-btn" id="qClear" aria-label="Quitar filtros" ${f.q || f.fam ? '' : 'hidden'}>${ICON_CLOSE}</button>
+        </div>
+        <div class="chips scroll-x" id="famFilter">${famChips}</div>
+      </div>`
+    : '';
+  render(`${heroHTML()}${search}<div id="timeline"></div>`);
+
+  const timeline = $('#timeline');
+  const renderTimeline = () => {
+    const list = filterEntries(entries, state.filter);
+    const filtering = !!(state.filter.q.trim() || state.filter.fam);
+    const groups = groupByDay(list);
+    let html = '';
+    if (!entries.length) html = emptyState();
+    else if (!groups.length) html = `<div class="empty"><strong>Nada coincide</strong>Prueba con otra palabra o quita el filtro.</div>`;
+    else {
+      html = groups
         .map((g) => {
           const fams = [...new Set(g.entries.map(primaryOf))];
-          const dots = fams.map((f) => `<i style="--c:${famColor(f)}"></i>`).join('');
+          const dots = fams.map((fid) => `<i style="--c:${famColor(fid)}"></i>`).join('');
           return `<section class="day-group"><div class="day-head"><h2>${esc(g.label)}</h2><span class="day-dots">${dots}</span></div>${g.entries.map(entryRow).join('')}</section>`;
         })
-        .join('')
-    : emptyState();
-  render(`${heroHTML()}${timeline}`);
-  hydrateThumbs(els.view);
+        .join('');
+      if (filtering) html = `<div class="muted small" style="margin:14px 4px -8px">${list.length} ${list.length === 1 ? 'anotación' : 'anotaciones'}</div>${html}`;
+    }
+    timeline.innerHTML = html;
+    hydrateThumbs(timeline);
+    const clear = $('#qClear');
+    if (clear) clear.hidden = !filtering;
+  };
+  renderTimeline();
+
+  const box = $('#search');
+  if (!box) return;
+  let timer = null;
+  $('#q', box).addEventListener('input', (ev) => {
+    state.filter.q = ev.target.value;
+    clearTimeout(timer);
+    timer = setTimeout(renderTimeline, 140);
+  });
+  box.addEventListener('click', (ev) => {
+    const chip = ev.target.closest('[data-ffam]');
+    if (chip) {
+      state.filter.fam = state.filter.fam === chip.dataset.ffam ? null : chip.dataset.ffam;
+      $$('[data-ffam]', box).forEach((c) => c.classList.toggle('selected', c.dataset.ffam === state.filter.fam));
+      renderTimeline();
+      return;
+    }
+    if (ev.target.closest('#qClear')) {
+      state.filter = { q: '', fam: null };
+      $('#q', box).value = '';
+      $$('[data-ffam]', box).forEach((c) => c.classList.remove('selected'));
+      renderTimeline();
+    }
+  });
 }
 
 // ---------- editor ----------
@@ -367,8 +679,13 @@ async function viewEditor(id) {
   setChrome({ title: existing ? 'Editar' : 'Ahora mismo', back: true });
   setActiveTab('new');
 
+  // Cada emoción lleva su propia intensidad. Las anotaciones antiguas solo tenían una global:
+  // se reparte a todas al editar.
   const form = existing
-    ? { ...existing, emotions: existing.emotions.map((x) => ({ ...x })) }
+    ? {
+        ...existing,
+        emotions: existing.emotions.map((x) => ({ ...x, intensity: emIntensity(existing, x) })),
+      }
     : {
         id: null,
         createdAt: Date.now(),
@@ -380,17 +697,21 @@ async function viewEditor(id) {
         company: null,
         photoId: null,
       };
-  let activeFamily = form.emotions.length && form.emotions[0].family !== 'otra' ? form.emotions[0].family : null;
-  let newPhoto = null;
-  let removePhoto = false;
-  let previewURL = null;
+  let openFamily = null;
+  const photos = []; // [{ id, full, thumb, url }] — id de una foto ya guardada, o null si es nueva
+  const removedIds = [];
   let whenTouched = !!existing;
   const custom = loadCustomWords();
+  // Palabras recientes: las últimas distintas que has usado, para anotar en dos toques.
+  const recent = [];
+  for (const e of entries) {
+    for (const em of e.emotions || []) {
+      if (em.word && !recent.some((r) => r.word === em.word)) recent.push({ word: em.word, family: em.family || 'otra' });
+    }
+    if (recent.length >= 8) break;
+  }
+  recent.length = Math.min(recent.length, 8);
 
-  const famChips = FAMILIES.map(
-    (f) =>
-      `<button type="button" class="tile" data-fam="${f.id}" style="--c:${famColor(f.id)}" aria-pressed="false"><i class="dot"></i><span>${esc(f.label)}</span><i class="check">${ICON_CHECK}</i></button>`
-  ).join('');
   const placeChips = PLACES.map((p) => `<button type="button" class="chip small" data-place="${p.id}">${esc(p.label)}</button>`).join('');
   const companyChips = COMPANY.map((c) => `<button type="button" class="chip small" data-company="${c.id}">${esc(c.label)}</button>`).join('');
 
@@ -398,26 +719,20 @@ async function viewEditor(id) {
     `<div id="editor">
       <div class="card">
         <h2>¿Qué sientes?</h2>
-        <p class="muted small">Toca una familia y afina la palabra. Puedes elegir varias; la primera cuenta como principal.</p>
-        <div class="tags" id="selTags" style="margin:8px 0 12px"></div>
-        <div class="tiles" id="famChips">${famChips}</div>
-        <div id="wordsBox" style="margin-top:12px"></div>
+        <p class="muted small">Toca una familia para desplegar sus palabras y marca las que encajen. Puedes mezclar varias, incluso contrarias.</p>
+        <div id="recentBox"></div>
+        <div class="tiles" id="famChips" style="margin-top:10px"></div>
+        <div id="wordsBox"></div>
         <div class="chip-input">
           <input type="text" id="customWord" placeholder="Otra palabra que lo describa mejor…" maxlength="30" autocomplete="off" />
           <button type="button" class="btn btn-sm" id="addCustom">Añadir</button>
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="chosenCard">
         <h2>¿Con cuánta fuerza?</h2>
-        <p class="muted small" style="margin:2px 0 0">Toca la barra que corresponda. Vuelve a tocar la última para bajar.</p>
-        <div class="intensity" style="margin-top:10px">
-          <div>
-            <div class="segs" id="segs" role="group" aria-label="Intensidad de 0 a 10"></div>
-            <div class="scale-hints"><span>nada</span><span>desbordante</span></div>
-          </div>
-          <div><div class="value" id="intVal">${Number(form.intensity) || 0}</div><div class="label" id="intLabel">${esc(intensityLabel(form.intensity))}</div></div>
-        </div>
+        <p class="muted small" id="chosenHint" style="margin:2px 0 0"></p>
+        <div id="chosen" style="margin-top:10px"></div>
       </div>
 
       <div class="card">
@@ -433,16 +748,16 @@ async function viewEditor(id) {
       </div>
 
       <div class="card">
-        <h3>Foto <span class="muted small" style="font-weight:400">(opcional)</span></h3>
+        <h3>Fotos <span class="muted small" style="font-weight:400">(opcional, hasta ${MAX_PHOTOS})</span></h3>
         <div class="photo-box">
-          <div class="photo-preview" id="photoPreview" hidden><img id="photoImg" alt="" /></div>
+          <div class="photo-strip" id="photoStrip" hidden></div>
+          <div class="muted small" id="photoHint" hidden style="margin:6px 0 2px">Toca una foto para verla entera. La estrella la pone de portada.</div>
           <div class="photo-actions">
             <button type="button" class="btn" id="btnCamera">Hacer foto</button>
             <button type="button" class="btn" id="btnGallery">De la galería</button>
-            <button type="button" class="btn btn-ghost" id="btnRemovePhoto" hidden>Quitar</button>
           </div>
           <input type="file" accept="image/*" capture="environment" id="fileCamera" class="file-hidden" />
-          <input type="file" accept="image/*" id="fileGallery" class="file-hidden" />
+          <input type="file" accept="image/*" multiple id="fileGallery" class="file-hidden" />
         </div>
       </div>
 
@@ -460,79 +775,111 @@ async function viewEditor(id) {
   );
 
   const root = $('#editor');
-  const selTags = $('#selTags', root);
+  const famBox = $('#famChips', root);
   const wordsBox = $('#wordsBox', root);
+  const chosenBox = $('#chosen', root);
+  const chosenHint = $('#chosenHint', root);
   const whenText = $('#whenText', root);
   const whenInput = $('#whenInput', root);
-  const photoPreview = $('#photoPreview', root);
-  const photoImg = $('#photoImg', root);
-  const btnRemovePhoto = $('#btnRemovePhoto', root);
+  const recentBox = $('#recentBox', root);
+  const photoStrip = $('#photoStrip', root);
+  const photoHint = $('#photoHint', root);
 
   function hasWord(word) {
     return form.emotions.some((x) => x.word === word);
   }
 
-  function renderTags() {
-    selTags.innerHTML = form.emotions.length
-      ? form.emotions
-          .map(
-            (em, idx) =>
-              `<span class="tag" style="--c:${famColor(em.family)}"><i class="dot"></i>${esc(em.word)}${idx === 0 && form.emotions.length > 1 ? ' <span class="muted small">principal</span>' : ''}<button type="button" data-remove="${esc(em.word)}" aria-label="Quitar ${esc(em.word)}">×</button></span>`
-          )
-          .join('')
-      : '<span class="muted small">Nada elegido todavía.</span>';
-    renderSegs();
+  function wordChip(w, famId, { dot = false } = {}) {
+    const on = hasWord(w);
+    return `<button type="button" class="chip small word ${on ? 'selected' : ''}" data-word="${esc(w)}" data-wfam="${famId}" style="--c:${famColor(famId)}" aria-pressed="${on}">${on ? ICON_CHECK : dot ? '<i class="dot"></i>' : ''}${esc(w)}</button>`;
   }
 
-  function renderFamilies() {
-    $$('.tile', root).forEach((c) => {
-      const on = c.dataset.fam === activeFamily;
-      c.classList.toggle('selected', on);
-      c.setAttribute('aria-pressed', on ? 'true' : 'false');
+  /** Índice de la emoción más intensa (a igualdad, la elegida antes): es la principal. */
+  function primaryIndex() {
+    let best = -1;
+    form.emotions.forEach((em, i) => {
+      if (best < 0 || em.intensity > form.emotions[best].intensity) best = i;
     });
+    return best;
   }
 
-  function renderSegs() {
-    const box = $('#segs', root);
-    if (!box) return;
-    const v = Math.max(0, Math.min(10, Number(form.intensity) || 0));
-    const primary = form.emotions.length ? form.emotions[0].family : null;
-    const c = primary ? famColor(primary) : 'var(--sun)';
-    box.innerHTML = Array.from(
-      { length: 10 },
-      (_, i) =>
-        `<button type="button" data-seg="${i + 1}" class="${i < v ? 'on' : ''}" style="height:${26 + i * 2}px;--c:${c}" aria-label="${i + 1} de 10" aria-pressed="${i < v}"></button>`
-    ).join('');
-    $('#intVal', root).textContent = String(v);
-    $('#intLabel', root).textContent = intensityLabel(v);
+  /** Baldosas de familias; la abierta despliega sus palabras justo debajo de su fila. */
+  function renderFamilies() {
+    const html = [];
+    FAMILIES.forEach((f, i) => {
+      const chosen = form.emotions.filter((x) => x.family === f.id).map((x) => x.word);
+      const open = openFamily === f.id;
+      html.push(
+        `<button type="button" class="tile${open ? ' open' : ''}${chosen.length ? ' has' : ''}" data-fam="${f.id}" style="--c:${famColor(f.id)}" aria-expanded="${open}">
+          ${chosen.length ? `<span class="tile-count" aria-label="${chosen.length} elegidas">${chosen.length}</span>` : '<i class="dot"></i>'}
+          <span class="tile-text"><span class="tile-name">${esc(f.label)}</span>${chosen.length ? `<span class="tile-sub">${esc(chosen.join(', '))}</span>` : ''}</span>
+          <i class="chev">${ICON_CHEVRON}</i>
+        </button>`
+      );
+      // Al final de cada fila de dos, si la familia abierta está en esa fila, su cajón de palabras.
+      const rowEnd = i % 2 === 1 || i === FAMILIES.length - 1;
+      if (rowEnd && openFamily) {
+        const rowStart = i - (i % 2);
+        const inRow = FAMILIES.slice(rowStart, i + 1).find((x) => x.id === openFamily);
+        if (inRow) {
+          html.push(
+            `<div class="tile-drawer" style="--c:${famColor(inRow.id)}" role="group" aria-label="Palabras de ${esc(inRow.label)}">
+              <div class="chips">${inRow.words.map((w) => wordChip(w, inRow.id)).join('')}</div>
+              <div class="muted small" style="margin-top:8px">Marca las que encajen. Toca otra familia para añadir más.</div>
+            </div>`
+          );
+        }
+      }
+    });
+    famBox.innerHTML = html.join('');
   }
 
   function renderWords() {
-    const parts = [];
-    if (activeFamily) {
-      const fam = familyOf(activeFamily);
-      parts.push(
-        `<div class="chips">${fam.words
-          .map(
-            (w) =>
-              `<button type="button" class="chip small word ${hasWord(w) ? 'selected' : ''}" data-word="${esc(w)}" data-wfam="${fam.id}" style="--c:${famColor(fam.id)}">${esc(w)}</button>`
-          )
+    recentBox.innerHTML = recent.length
+      ? `<div class="muted small" style="margin:10px 0 6px">Recientes</div><div class="chips">${recent
+          .map((r) => wordChip(r.word, r.family, { dot: true }))
           .join('')}</div>`
-      );
-    } else {
-      parts.push('<p class="muted small" style="margin:0">Elige una familia arriba para ver palabras más precisas.</p>');
-    }
-    if (custom.length) {
-      parts.push(
-        `<div class="muted small" style="margin:10px 0 6px">Tus palabras</div><div class="chips">${custom
-          .map((w) => {
-            const fam = familyForWord(w);
-            return `<button type="button" class="chip small word ${hasWord(w) ? 'selected' : ''}" data-word="${esc(w)}" data-wfam="${fam.id}" style="--c:${famColor(fam.id)}">${esc(w)}</button>`;
-          })
+      : '';
+    wordsBox.innerHTML = custom.length
+      ? `<div class="muted small" style="margin:12px 0 6px">Tus palabras</div><div class="chips">${custom
+          .map((w) => wordChip(w, familyForWord(w).id))
           .join('')}</div>`
-      );
+      : '';
+  }
+
+  /** Lista de emociones elegidas, cada una con su barra de intensidad. */
+  function renderChosen() {
+    if (!form.emotions.length) {
+      chosenHint.textContent = 'Primero elige arriba lo que sientes. Aquí podrás decir cuánto, emoción por emoción.';
+      chosenBox.innerHTML = '';
+      return;
     }
-    wordsBox.innerHTML = parts.join('');
+    chosenHint.textContent =
+      form.emotions.length > 1
+        ? 'Toca la barra que corresponda a cada una. La más fuerte cuenta como principal en los patrones.'
+        : 'Toca la barra que corresponda. Vuelve a tocar la última para bajar.';
+    const pi = primaryIndex();
+    chosenBox.innerHTML =
+      form.emotions
+        .map((em, idx) => {
+          const v = em.intensity;
+          const c = famColor(em.family);
+          const segs = Array.from(
+            { length: 10 },
+            (_, i) =>
+              `<button type="button" data-seg="${i + 1}" data-for="${idx}" class="${i < v ? 'on' : ''}" style="height:${22 + i * 2}px;--c:${c}" aria-label="${esc(em.word)}: ${i + 1} de 10" aria-pressed="${i < v}"></button>`
+          ).join('');
+          return `<div class="chosen-row" style="--c:${c}">
+            <div class="chosen-head">
+              <span class="tag"><i class="dot"></i>${esc(em.word)}</span>
+              ${idx === pi && form.emotions.length > 1 ? '<span class="badge">principal</span>' : ''}
+              <span class="chosen-val"><b>${v}</b> ${esc(intensityLabel(v))}</span>
+              <button type="button" class="x" data-remove="${esc(em.word)}" aria-label="Quitar ${esc(em.word)}">${ICON_CLOSE}</button>
+            </div>
+            <div class="segs" role="group" aria-label="Intensidad de ${esc(em.word)}">${segs}</div>
+          </div>`;
+        })
+        .join('') + '<div class="scale-hints"><span>nada</span><span>desbordante</span></div>';
   }
 
   function renderContext() {
@@ -544,13 +891,40 @@ async function viewEditor(id) {
     whenText.textContent = whenTouched ? fmtFull(form.createdAt) : `Ahora, ${fmtTime(form.createdAt)}`;
   }
 
-  function setPreview(blob) {
-    if (previewURL) URL.revokeObjectURL(previewURL);
-    previewURL = blob ? URL.createObjectURL(blob) : null;
-    photoPreview.hidden = !previewURL;
-    btnRemovePhoto.hidden = !previewURL;
-    if (previewURL) photoImg.src = previewURL;
+  function renderPhotos() {
+    photoStrip.hidden = !photos.length;
+    photoHint.hidden = !photos.length;
+    photoStrip.innerHTML = photos
+      .map(
+        (p, i) => `<div class="photo-item${i === 0 ? ' cover' : ''}">
+          <img src="${p.url}" alt="" data-photo-open="${i}" />
+          ${i === 0 ? '<span class="cover-tag">Portada</span>' : `<button type="button" class="mini star" data-photo-cover="${i}" aria-label="Usar como portada">${ICON_STAR}</button>`}
+          <button type="button" class="mini x" data-photo-remove="${i}" aria-label="Quitar foto">${ICON_CLOSE}</button>
+        </div>`
+      )
+      .join('');
+    const full = photos.length >= MAX_PHOTOS;
+    $('#btnCamera', root).disabled = full;
+    $('#btnGallery', root).disabled = full;
   }
+
+  function addPhoto(p) {
+    p.url = URL.createObjectURL(p.full);
+    photos.push(p);
+    renderPhotos();
+  }
+
+  function dropPhoto(i) {
+    const [p] = photos.splice(i, 1);
+    if (!p) return;
+    if (p.url) URL.revokeObjectURL(p.url);
+    if (p.id) removedIds.push(p.id);
+    renderPhotos();
+  }
+
+  state.onLeave = () => {
+    for (const p of photos) if (p.url) URL.revokeObjectURL(p.url);
+  };
 
   function addWord(word, familyId) {
     const w = (word || '').trim().toLowerCase();
@@ -558,33 +932,65 @@ async function viewEditor(id) {
     if (hasWord(w)) {
       form.emotions = form.emotions.filter((x) => x.word !== w);
     } else {
-      form.emotions.push({ word: w, family: familyId || familyForWord(w).id });
+      // Una emoción nueva arranca con la intensidad de la última elegida (o 5), para no tener que empezar de cero.
+      const last = form.emotions[form.emotions.length - 1];
+      form.emotions.push({ word: w, family: familyId || familyForWord(w).id, intensity: last ? last.intensity : 5 });
+      if (form.emotions.length === 1) toast('Ahora dile cuánto, más abajo', { ms: 1600 });
     }
-    renderTags();
+    renderFamilies();
     renderWords();
+    renderChosen();
   }
 
-  renderTags();
+  function removeWord(word) {
+    form.emotions = form.emotions.filter((x) => x.word !== word);
+    renderFamilies();
+    renderWords();
+    renderChosen();
+  }
+
   renderFamilies();
   renderWords();
+  renderChosen();
   renderContext();
   renderWhen();
 
-  if (existing && existing.photoId) {
-    db.getPhoto(existing.photoId)
-      .then((p) => {
-        if (p && !newPhoto && !removePhoto) setPreview(p.full);
-      })
-      .catch(() => {});
+  if (existing) {
+    // En orden, para que la portada siga siendo la misma.
+    (async () => {
+      for (const pid of photoIdsOf(existing)) {
+        try {
+          const p = await db.getPhoto(pid);
+          if (p) addPhoto({ id: pid, full: p.full, thumb: p.thumb });
+        } catch (e) {}
+      }
+    })();
   }
 
   root.addEventListener('click', (ev) => {
+    const pic = ev.target.closest('[data-photo-open]');
+    if (pic) {
+      openLightbox(
+        photos.map((p) => ({ url: p.url, blob: p.full })),
+        Number(pic.dataset.photoOpen)
+      );
+      return;
+    }
     const t = ev.target.closest('button');
     if (!t) return;
+    if (t.dataset.photoRemove != null) {
+      dropPhoto(Number(t.dataset.photoRemove));
+      return;
+    }
+    if (t.dataset.photoCover != null) {
+      const [p] = photos.splice(Number(t.dataset.photoCover), 1);
+      if (p) photos.unshift(p);
+      renderPhotos();
+      return;
+    }
     if (t.dataset.fam) {
-      activeFamily = activeFamily === t.dataset.fam ? null : t.dataset.fam;
+      openFamily = openFamily === t.dataset.fam ? null : t.dataset.fam;
       renderFamilies();
-      renderWords();
       return;
     }
     if (t.dataset.word) {
@@ -592,9 +998,7 @@ async function viewEditor(id) {
       return;
     }
     if (t.dataset.remove) {
-      form.emotions = form.emotions.filter((x) => x.word !== t.dataset.remove);
-      renderTags();
-      renderWords();
+      removeWord(t.dataset.remove);
       return;
     }
     if (t.dataset.place) {
@@ -608,9 +1012,11 @@ async function viewEditor(id) {
       return;
     }
     if (t.dataset.seg) {
+      const em = form.emotions[Number(t.dataset.for)];
+      if (!em) return;
       const k = Number(t.dataset.seg);
-      form.intensity = k === (Number(form.intensity) || 0) ? k - 1 : k;
-      renderSegs();
+      em.intensity = k === em.intensity ? k - 1 : k;
+      renderChosen();
       return;
     }
     switch (t.id) {
@@ -625,11 +1031,6 @@ async function viewEditor(id) {
         break;
       case 'btnGallery':
         $('#fileGallery', root).click();
-        break;
-      case 'btnRemovePhoto':
-        newPhoto = null;
-        if (form.photoId) removePhoto = true;
-        setPreview(null);
         break;
       case 'btnWhen': {
         const box = $('#whenEdit', root);
@@ -668,16 +1069,23 @@ async function viewEditor(id) {
   });
 
   async function onFile(ev) {
-    const file = ev.target.files && ev.target.files[0];
+    const files = Array.from(ev.target.files || []);
     ev.target.value = '';
-    if (!file) return;
-    try {
-      toast('Procesando foto…', { ms: 1200 });
-      newPhoto = await processPhoto(file);
-      removePhoto = false;
-      setPreview(newPhoto.full);
-    } catch (e) {
-      toast('No se pudo leer la foto');
+    if (!files.length) return;
+    const room = MAX_PHOTOS - photos.length;
+    if (room <= 0) {
+      toast(`Como mucho ${MAX_PHOTOS} fotos por anotación`);
+      return;
+    }
+    if (files.length > room) toast(`Solo caben ${room} más; añado las primeras`);
+    else toast(files.length > 1 ? 'Procesando fotos…' : 'Procesando foto…', { ms: 1200 });
+    for (const file of files.slice(0, room)) {
+      try {
+        const p = await processPhoto(file);
+        addPhoto({ id: null, full: p.full, thumb: p.thumb });
+      } catch (e) {
+        toast('No se pudo leer una foto');
+      }
     }
   }
   $('#fileCamera', root).addEventListener('change', onFile);
@@ -695,31 +1103,39 @@ async function viewEditor(id) {
     }
     btn.disabled = true;
     try {
+      // La más intensa va primero: es la "principal" que usan diario, patrones e informe.
+      // El orden es estable, así que a igualdad gana la que se eligió antes.
+      const emotions = form.emotions
+        .map((x, i) => ({ word: x.word, family: x.family, intensity: Math.max(0, Math.min(10, Number(x.intensity) || 0)), i }))
+        .sort((a, b) => b.intensity - a.intensity || a.i - b.i)
+        .map(({ word, family, intensity }) => ({ word, family, intensity }));
       const entry = {
         id: form.id || db.uuid(),
         createdAt: form.createdAt,
         updatedAt: Date.now(),
-        emotions: form.emotions,
-        intensity: Number(form.intensity) || 0,
+        emotions,
+        intensity: emotions[0].intensity,
         note: (form.note || '').trim(),
         thought: (form.thought || '').trim(),
         place: form.place || null,
         company: form.company || null,
-        photoId: form.photoId || null,
+        photoIds: [],
+        photoId: null, // compatibilidad con versiones anteriores: la portada
       };
-      if (newPhoto) {
-        const pid = db.uuid();
-        await db.savePhoto(pid, newPhoto.full, newPhoto.thumb);
-        if (form.photoId) {
-          await db.deletePhoto(form.photoId);
-          forgetThumb(form.photoId);
+      for (const p of photos) {
+        if (p.id) {
+          entry.photoIds.push(p.id);
+          continue;
         }
-        entry.photoId = pid;
-      } else if (removePhoto && form.photoId) {
-        await db.deletePhoto(form.photoId);
-        forgetThumb(form.photoId);
-        entry.photoId = null;
+        const pid = db.uuid();
+        await db.savePhoto(pid, p.full, p.thumb);
+        entry.photoIds.push(pid);
       }
+      for (const pid of removedIds) {
+        await db.deletePhoto(pid);
+        forgetThumb(pid);
+      }
+      entry.photoId = entry.photoIds[0] || null;
       await db.saveEntry(entry);
       upsertEntry(entry);
       for (const em of entry.emotions) if (em.family === OTHER_FAMILY.id) rememberCustomWord(em.word);
@@ -765,18 +1181,52 @@ async function viewDetail(id) {
   const key = skyFor(e.createdAt);
   const when = `${fmtDayLabel(e.createdAt)} · ${fmtTime(e.createdAt)}`;
   const caption = `<span class="shade"></span><span class="caption"><span class="when">${esc(when)}</span><span class="title">${esc(detailTitle(e))}</span></span>`;
-  const header = e.photoId
-    ? `<div class="detail-hero"><img id="fullPhoto" alt="" />${caption}</div>`
+  const pids = photoIdsOf(e);
+  const header = pids.length
+    ? `<div class="detail-hero has-photo"><img id="fullPhoto" alt="" /><button type="button" class="zoom-btn hero-zoom" id="zoomBtn" aria-label="Ampliar foto" hidden>${ICON_ZOOM}</button>${caption}</div>`
     : `<div class="detail-hero skyblock sky-${key}" style="${skyVars(key)}">${skyLayers(key)}${caption}</div>`;
+  const strip =
+    pids.length > 1
+      ? `<div class="detail-strip" id="detailStrip">${pids
+          .map((pid, k) => `<button type="button" data-open="${k}" aria-label="Foto ${k + 1} de ${pids.length}"><img data-photo="${esc(pid)}" alt="" /></button>`)
+          .join('')}</div>`
+      : '';
+  // Anotación anterior y siguiente en el tiempo (la lista va de más nueva a más antigua).
+  const pos = entries.indexOf(e);
+  const newer = pos > 0 ? entries[pos - 1] : null;
+  const older = pos < entries.length - 1 ? entries[pos + 1] : null;
+  const navRow =
+    newer || older
+      ? `<div class="detail-nav">
+          ${older ? `<button type="button" class="btn btn-ghost" data-go="${esc(older.id)}">‹ ${esc(fmtShortDate(older.createdAt))} ${esc(fmtTime(older.createdAt))}</button>` : '<span></span>'}
+          ${newer ? `<button type="button" class="btn btn-ghost" data-go="${esc(newer.id)}">${esc(fmtShortDate(newer.createdAt))} ${esc(fmtTime(newer.createdAt))} ›</button>` : '<span></span>'}
+        </div>`
+      : '';
+  const emotions = e.emotions || [];
+  const emRows = emotions
+    .map((em) => {
+      const v = emIntensity(e, em);
+      return `<div class="em-row" style="--c:${famColor(em.family || 'otra')}">
+        <span class="name"><i class="dot"></i>${esc(em.word)}</span>
+        <div class="meter-lg"><i style="width:${v * 10}%"></i></div>
+        <span class="val"><b>${v}</b><small>${esc(intensityLabel(v))}</small></span>
+      </div>`;
+    })
+    .join('');
   render(`<div id="detail">
     ${header}
+    ${strip}
     <div class="card" style="margin-top:12px">
       <div class="muted small">${esc(fmtFull(e.createdAt))}</div>
-      <div style="margin-top:8px">${emotionTags(e.emotions)}</div>
+      ${
+        emotions.length > 1 && !hasMixedIntensity(e)
+          ? `<div style="margin-top:8px">${emotionTags(emotions)}</div>
       <div class="intensity" style="margin-top:14px">
         <div><div class="meter-lg" style="--c:${famColor(primary)}"><i style="width:${i * 10}%"></i></div></div>
         <div><div class="value">${i}</div><div class="label">${esc(intensityLabel(i))}</div></div>
-      </div>
+      </div>`
+          : `<div class="em-list" style="margin-top:10px">${emRows}</div>`
+      }
       ${ctx.length ? `<dl class="kv" style="margin:14px 0 0">${ctx.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : ''}
     </div>
     ${e.note ? `<div class="card"><div class="section-title" style="margin-left:0">Qué estaba pasando</div><p class="quote">${esc(e.note)}</p></div>` : ''}
@@ -785,25 +1235,78 @@ async function viewDetail(id) {
       <a class="btn" href="#/edit/${esc(e.id)}" style="flex:1">Editar</a>
       <button type="button" class="btn btn-danger" id="delBtn" style="flex:1">Borrar</button>
     </div>
+    ${navRow}
+    ${newer || older ? '<p class="muted small" style="text-align:center;margin:10px 0 0">Desliza a los lados para pasar de anotación.</p>' : ''}
   </div>`);
+  const detailEl = $('#detail');
+  hydrateThumbs(detailEl);
 
-  if (e.photoId) {
-    db.getPhoto(e.photoId)
-      .then((p) => {
-        if (!p) return;
-        releaseFull();
-        state.fullURL = URL.createObjectURL(p.full);
-        const img = $('#fullPhoto');
-        if (img) img.src = state.fullURL;
-      })
-      .catch(() => {});
+  if (pids.length) {
+    const items = []; // [{ url, blob }] en el orden de las fotos, para el visor
+    (async () => {
+      releaseFull();
+      for (const pid of pids) {
+        try {
+          const p = await db.getPhoto(pid);
+          if (!p || !location.hash.includes(e.id)) return;
+          const url = URL.createObjectURL(p.full);
+          state.fullURLs.push(url);
+          items.push({ url, blob: p.full });
+          if (items.length === 1) {
+            const img = $('#fullPhoto');
+            if (img) img.src = url;
+            const zoom = $('#zoomBtn');
+            if (zoom) zoom.hidden = false;
+          }
+        } catch (err) {}
+      }
+    })();
+    // La foto del hero va recortada; tocarla (o el botón) la abre entera. La tira abre cada una.
+    detailEl.addEventListener('click', (ev) => {
+      if (!items.length) return;
+      const t = ev.target.closest('[data-open]');
+      if (t) openLightbox(items, Number(t.dataset.open));
+      else if (ev.target.closest('#zoomBtn') || ev.target.closest('#fullPhoto')) openLightbox(items, 0);
+    });
+  }
+
+  // Pasar a la anotación anterior o siguiente: botones o deslizar horizontalmente.
+  const goTo = (id2) => location.replace(`#/entry/${id2}`);
+  detailEl.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-go]');
+    if (b) goTo(b.dataset.go);
+  });
+  if (newer || older) {
+    let t0 = null;
+    detailEl.addEventListener(
+      'touchstart',
+      (ev) => {
+        const t = ev.touches[0];
+        t0 = ev.touches.length === 1 ? { x: t.clientX, y: t.clientY } : null;
+      },
+      { passive: true }
+    );
+    detailEl.addEventListener(
+      'touchend',
+      (ev) => {
+        if (!t0) return;
+        const t = ev.changedTouches[0];
+        const dx = t.clientX - t0.x;
+        const dy = t.clientY - t0.y;
+        t0 = null;
+        if (Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+        if (dx < 0 && newer) goTo(newer.id);
+        else if (dx > 0 && older) goTo(older.id);
+      },
+      { passive: true }
+    );
   }
 
   $('#delBtn').addEventListener('click', async () => {
     if (!confirm('¿Borrar esta anotación? No se puede deshacer.')) return;
     try {
       await db.deleteEntry(e);
-      if (e.photoId) forgetThumb(e.photoId);
+      for (const pid of pids) forgetThumb(pid);
       removeEntry(e.id);
       toast('Borrada');
       location.replace('#/');
@@ -836,6 +1339,8 @@ async function viewPatterns() {
     .join('');
 
   const section = (title, inner) => `<div class="section"><div class="section-title">${title}</div><div class="card">${inner}</div></div>`;
+  const weeks = days ? Math.ceil(days / 7) : Math.min(26, Math.ceil(spanDays / 7));
+  const balance = weeks > 1 ? weeklyBalance(list, weeks) : [];
 
   render(`<div id="patterns">
     <div class="range-tabs">${tabs}</div>
@@ -844,13 +1349,21 @@ async function viewPatterns() {
         ? `
       <div class="section"><div class="section-title">Resumen</div>${statsGrid(s)}</div>
       ${section('Calendario (emoción principal de cada día)', calendarChart(all, months))}
+      ${
+        balance.length
+          ? section(
+              'Balance por semanas',
+              `${balanceChart(balance)}<p class="muted small" style="margin:12px 0 0">Agradables hacia arriba, desagradables hacia abajo. Una anotación cuenta como agradable si pesan más sus familias agradables (alegría, calma) que las desagradables.</p>`
+            )
+          : ''
+      }
       ${section('Emociones (veces mencionadas)', familyList(s))}
       ${section('Palabras que más usas', wordsCloud(s.topWords))}
       ${section('Por día de la semana', stackedRows(s.byWeekday))}
       ${section('Por momento del día', stackedRows(s.byBand, { hint: true }))}
       ${s.byPlace.length ? section('Dónde', stackedRows(s.byPlace)) : ''}
       ${s.byCompany.length ? section('Con quién', stackedRows(s.byCompany)) : ''}
-      <p class="muted small" style="margin-top:16px">Cada anotación cuenta una vez por su emoción principal (la primera que eliges). Para llevar esto a consulta, genera un informe desde Ajustes.</p>`
+      <p class="muted small" style="margin-top:16px">Cada anotación cuenta una vez por su emoción principal (la más intensa; a igualdad, la que elegiste antes). Para llevar esto a consulta, genera un informe desde Ajustes.</p>`
         : `<div class="empty"><strong>Nada en este periodo</strong>${all.length ? 'Prueba con un rango más amplio.' : 'Cuando lleves unos días anotando, aquí empezarán a verse patrones.'}</div>`
     }
   </div>`);
@@ -1057,16 +1570,15 @@ async function exportBackup(btn) {
   btn.disabled = true;
   try {
     const entries = await getEntries();
-    const out = { app: 'momento', version: 1, exportedAt: new Date().toISOString(), entries: [] };
+    const out = { app: 'momento', version: 2, exportedAt: new Date().toISOString(), entries: [] };
     for (const e of entries) {
       const rec = { ...e };
-      if (e.photoId) {
-        const p = await db.getPhoto(e.photoId);
-        if (p) {
-          rec.photo = await blobToDataURL(p.full);
-          rec.photoThumb = await blobToDataURL(p.thumb);
-        }
+      const pics = [];
+      for (const pid of photoIdsOf(e)) {
+        const p = await db.getPhoto(pid);
+        if (p) pics.push({ id: pid, full: await blobToDataURL(p.full), thumb: await blobToDataURL(p.thumb) });
       }
+      if (pics.length) rec.photos = pics;
       out.entries.push(rec);
     }
     const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
@@ -1106,22 +1618,33 @@ async function importBackup(file) {
         id: rec.id,
         createdAt: Number(rec.createdAt),
         updatedAt: Number(rec.updatedAt) || Date.now(),
-        emotions: rec.emotions.map((x) => ({ word: String(x.word || ''), family: familyOf(x.family).id })).filter((x) => x.word),
+        emotions: rec.emotions
+          .map((x) => {
+            const em = { word: String(x.word || ''), family: familyOf(x.family).id };
+            if (x.intensity != null && !Number.isNaN(Number(x.intensity))) em.intensity = Math.max(0, Math.min(10, Math.round(Number(x.intensity))));
+            return em;
+          })
+          .filter((x) => x.word),
         intensity: Number(rec.intensity) || 0,
         note: String(rec.note || ''),
         thought: String(rec.thought || ''),
         place: rec.place || null,
         company: rec.company || null,
+        photoIds: [],
         photoId: null,
       };
-      if (rec.photo) {
-        const pid = rec.photoId || db.uuid();
-        const full = await dataURLToBlob(rec.photo);
-        const thumb = rec.photoThumb ? await dataURLToBlob(rec.photoThumb) : full;
+      // Copias nuevas traen `photos` (varias); las antiguas, una sola en `photo`.
+      const pics = Array.isArray(rec.photos) ? rec.photos : rec.photo ? [{ id: rec.photoId, full: rec.photo, thumb: rec.photoThumb }] : [];
+      for (const pic of pics) {
+        if (!pic || typeof pic.full !== 'string') continue;
+        const pid = pic.id || db.uuid();
+        const full = await dataURLToBlob(pic.full);
+        const thumb = pic.thumb ? await dataURLToBlob(pic.thumb) : full;
         await db.savePhoto(pid, full, thumb);
-        entry.photoId = pid;
         forgetThumb(pid);
+        entry.photoIds.push(pid);
       }
+      entry.photoId = entry.photoIds[0] || null;
       await db.saveEntry(entry);
       upsertEntry(entry);
       if (prev) updated += 1;

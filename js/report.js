@@ -3,9 +3,9 @@
 import * as db from './db.js';
 import { PLACES, COMPANY, labelFor, intensityLabel } from './emotions.js';
 import { fmtFull, fmtShortDate, escapeHtml as esc } from './format.js';
-import { summarize, filterRange } from './stats.js';
-import { statsGrid, familyList, wordsCloud, stackedRows, emotionTags } from './charts.js';
-import { blobToDataURL } from './photo.js';
+import { summarize, filterRange, weeklyBalance } from './stats.js';
+import { statsGrid, familyList, wordsCloud, stackedRows, emotionTags, balanceChart } from './charts.js';
+import { blobToDataURL, photoIdsOf } from './photo.js';
 
 export async function buildReport(entries, { from, to, photos = true, thoughts = true, notes = true }) {
   const list = filterRange(entries, from, to)
@@ -16,22 +16,29 @@ export async function buildReport(entries, { from, to, photos = true, thoughts =
   const thumbs = new Map();
   if (photos) {
     for (const e of list) {
-      if (!e.photoId) continue;
-      try {
-        const b = await db.getThumb(e.photoId);
-        if (b) thumbs.set(e.photoId, await blobToDataURL(b));
-      } catch (err) {
-        console.warn('foto no disponible', e.photoId);
+      for (const pid of photoIdsOf(e)) {
+        try {
+          const b = await db.getThumb(pid);
+          if (b) thumbs.set(pid, await blobToDataURL(b));
+        } catch (err) {
+          console.warn('foto no disponible', pid);
+        }
       }
     }
   }
+  const weeks = list.length ? Math.max(1, Math.min(26, Math.ceil((to - from) / (7 * 86400000)))) : 0;
+  const balance = weeks > 1 ? weeklyBalance(list, weeks, to) : [];
 
   const section = (title, inner) => `<section class="section"><div class="section-title">${title}</div>${inner}</section>`;
 
   const items = list
     .map((e) => {
+      const ems = e.emotions || [];
+      const mixed = ems.length > 1 && ems.some((em) => em.intensity != null && Number(em.intensity) !== Number(ems[0].intensity));
       const ctx = [
-        `Intensidad ${Number(e.intensity) || 0}/10 (${intensityLabel(e.intensity)})`,
+        mixed
+          ? `Intensidad por emoción (0–10); principal ${Number(e.intensity) || 0}/10 (${intensityLabel(e.intensity)})`
+          : `Intensidad ${Number(e.intensity) || 0}/10 (${intensityLabel(e.intensity)})`,
         e.place ? labelFor(PLACES, e.place) : '',
         e.company ? labelFor(COMPANY, e.company) : '',
       ]
@@ -39,8 +46,9 @@ export async function buildReport(entries, { from, to, photos = true, thoughts =
         .join(' · ');
       const note = notes && e.note ? `<div class="txt"><label>Qué estaba pasando</label>${esc(e.note)}</div>` : '';
       const thought = thoughts && e.thought ? `<div class="txt"><label>Qué me pasaba por la cabeza</label>${esc(e.thought)}</div>` : '';
-      const img = thumbs.has(e.photoId) ? `<img src="${thumbs.get(e.photoId)}" alt="" loading="lazy" />` : '';
-      return `<article class="report-entry"><div class="when">${esc(fmtFull(e.createdAt))}</div>${emotionTags(e.emotions)}<div class="ctx">${esc(ctx)}</div>${note}${thought}${img}</article>`;
+      const imgs = photoIdsOf(e).filter((pid) => thumbs.has(pid));
+      const img = imgs.length ? `<div class="pics">${imgs.map((pid) => `<img src="${thumbs.get(pid)}" alt="" loading="lazy" />`).join('')}</div>` : '';
+      return `<article class="report-entry"><div class="when">${esc(fmtFull(e.createdAt))}</div>${emotionTags(ems, { intensities: mixed })}<div class="ctx">${esc(ctx)}</div>${note}${thought}${img}</article>`;
     })
     .join('');
 
@@ -55,6 +63,7 @@ export async function buildReport(entries, { from, to, photos = true, thoughts =
     ${list.length ? section('Resumen', statsGrid(s)) : ''}
     ${list.length ? section('Emociones (veces mencionadas)', familyList(s)) : ''}
     ${list.length ? section('Palabras más usadas', wordsCloud(s.topWords)) : ''}
+    ${balance.length ? section('Balance por semanas (agradables arriba, desagradables abajo)', balanceChart(balance)) : ''}
     ${list.length ? section('Por día de la semana (emoción principal)', stackedRows(s.byWeekday)) : ''}
     ${list.length ? section('Por momento del día', stackedRows(s.byBand, { hint: true })) : ''}
     ${s.byPlace.length ? section('Dónde', stackedRows(s.byPlace)) : ''}
@@ -66,7 +75,7 @@ export async function buildReport(entries, { from, to, photos = true, thoughts =
 
 const REPORT_CSS = `
 :root{--bg:#fff;--surface:#fff;--surface-2:#ede9e1;--text:#1d1f24;--text-2:#4f525b;--muted:#6f727b;--line:#e4dfd5;--sun:#c98500;
---fam-alegria:#c98500;--fam-tristeza:#2a78d6;--fam-calma:#008300;--fam-enfado:#e34948;--fam-miedo:#4a3aa7;--fam-sorpresa:#0f9bb1;--fam-cansancio:#a8622a;--fam-rechazo:#d55181;--fam-otra:#898781}
+--fam-alegria:#c98500;--fam-tristeza:#2a78d6;--fam-calma:#008300;--fam-enfado:#e34948;--fam-miedo:#4a3aa7;--fam-sorpresa:#0f9bb1;--fam-cansancio:#a8622a;--fam-rechazo:#d55181;--fam-otra:#898781;--pos:#1f2633;--neg:#a39c8f}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .report{max-width:720px;margin:0 auto;padding:24px 20px}
 h2{margin:0;font-size:1.4rem}.muted{color:var(--muted)}.small{font-size:.875rem}
@@ -78,6 +87,9 @@ h2{margin:0;font-size:1.4rem}.muted{color:var(--muted)}.small{font-size:.875rem}
 .bars{display:grid;gap:8px}.bar-row{display:grid;grid-template-columns:84px 1fr auto;align-items:center;gap:10px;font-size:.9rem}.bar-row .lbl{color:var(--text-2)}.bar-row .lbl small{display:block;color:var(--muted);font-size:.72rem}.bar-row .val{color:var(--text-2);min-width:2ch;text-align:right}
 .bar{display:flex;gap:2px;height:14px}.bar .seg{height:100%;background:var(--c);border-radius:2px;min-width:2px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:.82rem;color:var(--text-2)}.legend span{display:inline-flex;align-items:center;gap:6px}
+.balance{display:flex;gap:3px;height:120px}.bal-col{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}.bal-col .up{flex:1;display:flex;align-items:flex-end;border-bottom:1px solid #c9c3b7}.bal-col .dn{flex:1;display:flex;align-items:flex-start}
+.bal-col .up i{display:block;width:100%;background:var(--pos);border-radius:3px 3px 0 0}.bal-col .dn i{display:block;width:100%;background:var(--neg);border-radius:0 0 3px 3px}.bal-col .lbl{position:absolute;left:0;right:0;top:100%;text-align:center;font-size:.6rem;color:var(--muted);white-space:nowrap}.balance+.legend{margin-top:22px}
+.report-entry .pics{display:flex;flex-wrap:wrap;gap:6px}.report-entry .pics img{width:calc(50% - 3px);max-width:220px;max-height:200px;object-fit:cover;border-radius:10px}
 .table-view summary{color:var(--muted);font-size:.8rem;cursor:pointer;margin-top:8px}.table-view table{border-collapse:collapse;width:100%;font-size:.8rem;margin-top:6px}.table-view th,.table-view td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--line)}.table-view th:first-child,.table-view td:first-child{text-align:left}
 .report-entry{padding:12px 0;border-top:1px solid var(--line);display:grid;gap:6px;break-inside:avoid;page-break-inside:avoid}.report-entry:first-child{border-top:0}.report-entry .when{font-weight:700}.report-entry .ctx{color:var(--muted);font-size:.85rem}
 .report-entry .txt{white-space:pre-wrap}.report-entry .txt label{display:block;color:var(--muted);font-size:.8rem}.report-entry img{display:block;max-width:320px;max-height:240px;width:100%;object-fit:cover;border-radius:10px}

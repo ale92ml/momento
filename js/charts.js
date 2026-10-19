@@ -183,8 +183,40 @@ export function statsGrid(s) {
   </div>`;
 }
 
-export function emotionTags(emotions) {
+/** Etiquetas de emociones. Con `intensities`, cada una lleva su número (si la anotación los guarda por emoción). */
+export function emotionTags(emotions, { intensities = false } = {}) {
   return `<div class="tags">${(emotions || [])
-    .map((em) => `<span class="tag" style="--c:${famColor(em.family || 'otra')}"><i class="dot"></i>${esc(em.word)}</span>`)
+    .map((em) => {
+      const n = intensities && em.intensity != null ? `<b>${Number(em.intensity) || 0}</b>` : '';
+      return `<span class="tag" style="--c:${famColor(em.family || 'otra')}"><i class="dot"></i>${esc(em.word)}${n}</span>`;
+    })
     .join('')}</div>`;
+}
+
+const dayMonthFmt = new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'short' });
+
+/** Balance semanal: anotaciones agradables hacia arriba, desagradables hacia abajo. */
+export function balanceChart(weeks) {
+  if (!weeks.length) return '';
+  const max = Math.max(1, ...weeks.map((w) => Math.max(w.positive, w.negative)));
+  const every = weeks.length > 14 ? 4 : weeks.length > 8 ? 2 : 1;
+  const cols = weeks
+    .map((w, i) => {
+      const up = Math.round((w.positive / max) * 100);
+      const dn = Math.round((w.negative / max) * 100);
+      const label = dayMonthFmt.format(new Date(w.to));
+      const show = (weeks.length - 1 - i) % every === 0;
+      return `<div class="bal-col" title="Semana hasta el ${esc(label)}: ${w.positive} agradables, ${w.negative} desagradables">
+        <div class="up"><i style="height:${up}%"></i></div>
+        <div class="dn"><i style="height:${dn}%"></i></div>
+        <span class="lbl">${show ? esc(label) : ''}</span>
+      </div>`;
+    })
+    .join('');
+  const rows = weeks
+    .map((w) => `<tr><td>Hasta ${esc(dayMonthFmt.format(new Date(w.to)))}</td><td>${w.positive}</td><td>${w.negative}</td><td>${w.neutral}</td></tr>`)
+    .join('');
+  return `<div class="balance">${cols}</div>
+    <div class="legend"><span><i class="dot" style="--c:var(--pos)"></i>Agradables</span><span><i class="dot" style="--c:var(--neg)"></i>Desagradables</span></div>
+    <details class="table-view"><summary>Ver como tabla</summary><table><thead><tr><th>Semana</th><th>Agradables</th><th>Desagradables</th><th>Neutras</th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }

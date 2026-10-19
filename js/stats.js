@@ -56,6 +56,37 @@ export function entryFamilies(entry) {
 
 export const ALL_FAMILY_IDS = [...STACK_ORDER, OTHER_FAMILY.id];
 
+/** Valencia de una anotación: suma de la de sus familias (+1 agradable, -1 desagradable, 0 neutra). */
+export function entryValence(entry) {
+  let val = 0;
+  for (const f of entryFamilies(entry)) {
+    const fam = FAMILIES.find((x) => x.id === f);
+    if (fam) val += fam.valence;
+  }
+  return val;
+}
+
+/** Balance agradable/desagradable por semanas (bloques de 7 días terminando hoy). */
+export function weeklyBalance(entries, weeks, now = Date.now()) {
+  const end = new Date(now);
+  end.setHours(23, 59, 59, 999);
+  const out = [];
+  for (let i = weeks - 1; i >= 0; i--) {
+    const to = end.getTime() - i * 7 * DAY_MS;
+    out.push({ from: to - 7 * DAY_MS + 1, to, positive: 0, negative: 0, neutral: 0, total: 0 });
+  }
+  for (const e of entries) {
+    const w = out.find((b) => e.createdAt >= b.from && e.createdAt <= b.to);
+    if (!w) continue;
+    const v = entryValence(e);
+    if (v > 0) w.positive += 1;
+    else if (v < 0) w.negative += 1;
+    else w.neutral += 1;
+    w.total += 1;
+  }
+  return out;
+}
+
 function emptyFamilyCounts() {
   const o = {};
   for (const id of ALL_FAMILY_IDS) o[id] = 0;
@@ -93,15 +124,22 @@ export function summarize(entries) {
     const inten = Number(e.intensity) || 0;
     intensitySum += inten;
     let val = 0;
-    for (const f of entryFamilies(e)) {
+    // Intensidad por familia: la de su emoción más fuerte en esta anotación
+    // (las anotaciones antiguas solo guardan una intensidad global).
+    const famInt = new Map();
+    for (const em of e.emotions || []) {
+      const f = em.family || OTHER_FAMILY.id;
+      const v = em.intensity != null ? Number(em.intensity) || 0 : inten;
+      famInt.set(f, Math.max(famInt.get(f) || 0, v));
+    }
+    for (const [f, v] of famInt) {
       familyCounts[f] = (familyCounts[f] || 0) + 1;
       const fi = familyIntensity[f] || { sum: 0, n: 0 };
-      fi.sum += inten;
+      fi.sum += v;
       fi.n += 1;
       familyIntensity[f] = fi;
-      const fam = FAMILIES.find((x) => x.id === f);
-      if (fam) val += fam.valence;
     }
+    val = entryValence(e);
     if (val < 0) negative += 1;
     else if (val > 0) positive += 1;
 

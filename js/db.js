@@ -191,7 +191,8 @@ export async function saveEntry(entry) {
 
 export async function deleteEntry(entry) {
   await idbDel('entries', entry.id);
-  if (entry.photoId) await idbDel('photos', entry.photoId);
+  const ids = Array.isArray(entry.photoIds) ? entry.photoIds : entry.photoId ? [entry.photoId] : [];
+  for (const id of ids) if (id) await idbDel('photos', id);
 }
 
 export async function countEntries() {

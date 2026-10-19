@@ -6,14 +6,14 @@ Es una **PWA** (web app instalable): HTML, CSS y JavaScript sin frameworks ni de
 
 ## Qué hace
 
-- **Anotar en 20 segundos**: familia emocional → palabra concreta (o una tuya), intensidad 0–10, texto libre, contexto y foto.
-- **Diario** por días con miniaturas.
-- **Patrones**: emociones más frecuentes, palabras, día a día, por día de la semana, por franja horaria, dónde y con quién. Cada gráfico tiene leyenda y vista en tabla.
+- **Anotar en 20 segundos**: familia emocional → palabra concreta (o una tuya), intensidad 0–10 **de cada emoción por separado** (sirve para sentir alegría y tristeza a la vez con distinta fuerza), texto libre, contexto y hasta cuatro fotos (la primera es la portada). Una fila de palabras recientes permite anotar en dos toques. La más intensa cuenta como principal.
+- **Diario** por días con miniaturas, buscador por palabra, nota o pensamiento y filtro por familia emocional. En el detalle se pasa a la anotación anterior o siguiente deslizando.
+- **Patrones**: emociones más frecuentes, palabras, balance semanal de anotaciones agradables y desagradables, día a día, por día de la semana, por franja horaria, dónde y con quién. Cada gráfico tiene leyenda y vista en tabla.
 - **Informe** para consulta: rango de fechas, eliges qué incluir (fotos, notas, pensamientos), se imprime a PDF o se comparte como archivo HTML.
-- **Diseño**: portada con el cielo según la hora (amanecer, día, atardecer, noche) y saludo; el detalle de una anotación sin foto muestra ese mismo cielo, y con foto, la foto a ancho completo. Familias emocionales en baldosas, intensidad en diez barras que se tiñen con la emoción principal, calendario mensual en Patrones y bienvenida de tres pantallas la primera vez. Tipografía de cabecera Fraunces (licencia libre), alojada en `fonts/`.
+- **Diseño**: portada con el cielo según la hora (amanecer, día, atardecer, noche) y saludo; el detalle de una anotación sin foto muestra ese mismo cielo, y con foto, la foto a ancho completo con botón para verla entera (pellizco para ampliar, deslizar entre fotos y compartir con la hoja nativa del móvil). Familias emocionales en baldosas que despliegan sus palabras debajo, intensidad en diez barras por emoción teñidas con su color, calendario mensual en Patrones y bienvenida de tres pantallas la primera vez. Tipografía de cabecera Fraunces (licencia libre), alojada en `fonts/`.
 - **Colores personalizables** (Ajustes → Colores): el color de cada emoción y el color principal, por separado para tema claro y oscuro, con vista previa en vivo, cuatro paletas predefinidas y aviso automático si dos colores se parecen demasiado, contrastan poco o se confunden con daltonismo. El informe usa los colores elegidos.
 - **Privacidad**: todo se guarda en el propio móvil (IndexedDB) cifrado con AES-GCM. Con PIN, la clave solo se desbloquea al abrir. Nada sale del dispositivo salvo lo que exportes.
-- **Copia de seguridad**: exportar e importar un archivo JSON (incluye fotos).
+- **Copia de seguridad**: exportar e importar un archivo JSON (incluye todas las fotos). Las copias de la versión 1 (una foto por anotación) se importan sin problema.
 
 ## Probarla en el ordenador
 
@@ -68,5 +68,5 @@ fonts/                Fraunces (subconjunto latino, woff2)
 - **Si olvidas el PIN no hay recuperación posible.** La clave de cifrado se guarda envuelta con el PIN; sin él, los datos son ilegibles. Exporta copias.
 - Los datos viven en el navegador del móvil. Si borras los datos del navegador, se pierden. En iPhone, instalarla en la pantalla de inicio reduce el riesgo de que Safari los borre por inactividad.
 - Las copias exportadas (JSON) y los informes (HTML) **no van cifrados**: son para compartir o guardar donde tú decidas.
-- Los gráficos cuentan cada anotación una vez por su **emoción principal** (la primera que eliges). La lista de emociones cuenta todas las mencionadas.
+- Los gráficos cuentan cada anotación una vez por su **emoción principal** (la más intensa; a igualdad, la elegida antes). La lista de emociones cuenta todas las mencionadas. Las anotaciones de versiones anteriores guardan una sola intensidad; al editarlas se reparte a cada emoción.
 - La paleta por defecto y las paletas predefinidas están validadas para daltonismo en claro y oscuro; el orden de apilado de los gráficos (`STACK_ORDER` en [js/emotions.js](js/emotions.js)) forma parte de esa validación. Si personalizas colores a mano, la página de Colores avisa de los problemas pero no impide guardarlos.
